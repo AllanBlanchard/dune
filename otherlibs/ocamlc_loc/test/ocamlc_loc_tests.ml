@@ -37,81 +37,6 @@ module Test = struct
     Ocamlc_loc.parse output |> print_errors
 end
 
-let%expect_test "" =
-  Test.create (fun t ->
-      let open Test in
-      let (_ : Path.t) = file t ~fname:"test.ml" ~contents:"let () = 123" in
-      cmd "ocamlc -c test.ml 2> out";
-      Path.relative t.dir "out");
-  [%expect
-    {|
-    >> error 0
-    { loc = { path = "test.ml"; line = Single 1; chars = Some (9, 12) }
-    ; message =
-        "This expression has type int but an expression was expected of type\n\
-        \  unit"
-    ; related = []
-    ; severity = Error None
-    } |}]
-
-let%expect_test "" =
-  Test.create (fun t ->
-      let open Test in
-      let (_ : Path.t) =
-        file t ~fname:"test.ml"
-          ~contents:
-            {ocaml|
-module X : sig
-  val x : int -> int
-end = struct
-  let x y = y +. 2.0
-end
-|ocaml}
-      in
-      cmd "ocamlc -c test.ml 2> out";
-      Path.relative t.dir "out");
-  [%expect
-    {|
-    >> error 0
-    { loc = { path = "test.ml"; line = Range 4,6; chars = Some (6, 3) }
-    ; message =
-        "Signature mismatch:\n\
-         Modules do not match:\n\
-        \  sig val x : float -> float end\n\
-         is not included in\n\
-        \  sig val x : int -> int end\n\
-         Values do not match:\n\
-        \  val x : float -> float\n\
-         is not included in\n\
-        \  val x : int -> int\n\
-         The type float -> float is not compatible with the type int -> int\n\
-         Type float is not compatible with type int"
-    ; related =
-        [ ({ path = "test.ml"; line = Single 3; chars = Some (2, 20) },
-          "Expected declaration")
-        ; ({ path = "test.ml"; line = Single 5; chars = Some (6, 7) },
-          "Actual declaration")
-        ]
-    ; severity = Error None
-    } |}]
-
-let%expect_test "warning" =
-  Test.create (fun t ->
-      let open Test in
-      let (_ : Path.t) =
-        file t ~fname:"test.ml" ~contents:"let () = let x = 2 in ()"
-      in
-      cmd "ocamlc -c test.ml 2> out";
-      Path.relative t.dir "out");
-  [%expect
-    {|
-    >> error 0
-    { loc = { path = "test.ml"; line = Single 1; chars = Some (13, 14) }
-    ; message = "unused variable x."
-    ; related = []
-    ; severity = Warning { code = 26; name = "unused-var" }
-    } |}]
-
 (* FIXME: unused value warning isn't parsed correctly - the file excerpt isn't
    extracted *)
 let%expect_test "unused value" =
@@ -135,22 +60,31 @@ Error (warning 32 [unused-value-declaration]): unused value foo.
     ; severity = Error Some { code = 32; name = "unused-value-declaration" }
     } |}]
 
+let test_error raw_error =
+  String.trim raw_error |> Ocamlc_loc.parse |> Test.print_errors
+
+let test_error_raw raw_error =
+  String.trim raw_error |> Ocamlc_loc.parse_raw |> Ocamlc_loc.dyn_of_raw
+  |> Dyn.to_string |> print_endline
+
 let%expect_test "mli mismatch" =
-  Test.create (fun t ->
-      let open Test in
-      let (_ : Path.t) = file t ~fname:"test.mli" ~contents:"val x : int" in
-      let (_ : Path.t) = file t ~fname:"test.ml" ~contents:"let x = false" in
-      cmd "ocamlc -c test.mli 2> /dev/null";
-      cmd "ocamlc -c test.ml 2> out";
-      Path.relative t.dir "out");
+  test_error
+    {|
+File "test.ml", line 1:
+Error: The implementation test.ml does not match the interface test.cmi:
+       Values do not match: val x : bool is not included in val x : int
+       The type bool is not compatible with the type int
+       File "test.mli", line 1, characters 0-11: Expected declaration
+       File "test.ml", line 1, characters 4-5: Actual declaration
+|};
   [%expect
     {|
     >> error 0
     { loc = { path = "test.ml"; line = Single 1; chars = None }
     ; message =
-        "The implementation test.ml does not match the interface test.cmi: \n\
-         Values do not match: val x : bool is not included in val x : int\n\
-         The type bool is not compatible with the type int"
+        "The implementation test.ml does not match the interface test.cmi:\n\
+        \       Values do not match: val x : bool is not included in val x : int\n\
+        \       The type bool is not compatible with the type int"
     ; related =
         [ ({ path = "test.mli"; line = Single 1; chars = Some (0, 11) },
           "Expected declaration")
@@ -160,8 +94,88 @@ let%expect_test "mli mismatch" =
     ; severity = Error None
     } |}]
 
-let test_error raw_error =
-  String.trim raw_error |> Ocamlc_loc.parse |> Test.print_errors
+let%expect_test "" =
+  test_error
+    {|
+File "test.ml", line 1, characters 9-12:
+1 | let () = 123
+             ^^^
+Error: This expression has type int but an expression was expected of type
+         unit
+|};
+  [%expect
+    {|
+    >> error 0
+    { loc = { path = "test.ml"; line = Single 1; chars = Some (9, 12) }
+    ; message =
+        "This expression has type int but an expression was expected of type\n\
+        \         unit"
+    ; related = []
+    ; severity = Error None
+    } |}]
+
+let%expect_test "warning" =
+  test_error
+    {|
+File "test.ml", line 1, characters 13-14:
+1 | let () = let x = 2 in ()
+                 ^
+Warning 26 [unused-var]: unused variable x.
+|};
+  [%expect
+    {|
+    >> error 0
+    { loc = { path = "test.ml"; line = Single 1; chars = Some (13, 14) }
+    ; message = "unused variable x."
+    ; related = []
+    ; severity = Warning { code = 26; name = "unused-var" }
+    } |}]
+
+let%expect_test "" =
+  test_error
+    {|
+File "test.ml", lines 3-5, characters 6-3:
+3 | ......struct
+4 |   let x y = y +. 2.0
+5 | end
+Error: Signature mismatch:
+       Modules do not match:
+         sig val x : float -> float end
+       is not included in
+         sig val x : int -> int end
+       Values do not match:
+         val x : float -> float
+       is not included in
+         val x : int -> int
+       The type float -> float is not compatible with the type int -> int
+       Type float is not compatible with type int
+       File "test.ml", line 2, characters 2-20: Expected declaration
+       File "test.ml", line 4, characters 6-7: Actual declaration
+|};
+  [%expect
+    {|
+    >> error 0
+    { loc = { path = "test.ml"; line = Range 3,5; chars = Some (6, 3) }
+    ; message =
+        "Signature mismatch:\n\
+        \       Modules do not match:\n\
+        \         sig val x : float -> float end\n\
+        \       is not included in\n\
+        \         sig val x : int -> int end\n\
+        \       Values do not match:\n\
+        \         val x : float -> float\n\
+        \       is not included in\n\
+        \         val x : int -> int\n\
+        \       The type float -> float is not compatible with the type int -> int\n\
+        \       Type float is not compatible with type int"
+    ; related =
+        [ ({ path = "test.ml"; line = Single 2; chars = Some (2, 20) },
+          "Expected declaration")
+        ; ({ path = "test.ml"; line = Single 4; chars = Some (6, 7) },
+          "Actual declaration")
+        ]
+    ; severity = Error None
+    } |}]
 
 let%expect_test "ml mli mismatch 2" =
   test_error
@@ -194,20 +208,20 @@ Error: The implementation src/dune_rules/artifacts.ml
         { path = "src/dune_rules/artifacts.ml"; line = Single 1; chars = None }
     ; message =
         "The implementation src/dune_rules/artifacts.ml\n\
-         does not match the interface src/dune_rules/.dune_rules.objs/byte/dune_rules__Artifacts.cmi:\n\
-        \ ... ... In module Bin.Local:\n\
-         Values do not match:\n\
-        \  val equal :\n\
-        \    Import.Path.Build.t Import.String.Set.map ->\n\
-        \    Import.Path.Build.t Import.String.Set.map -> bool\n\
-         is not included in\n\
-        \  val equal : t -> bool -> bool\n\
-         The type\n\
-        \  Import.Path.Build.t Import.String.Set.map ->\n\
-        \  Import.Path.Build.t Import.String.Set.map -> bool\n\
-         is not compatible with the type t -> bool -> bool\n\
-         Type Import.Path.Build.t Import.String.Set.map\n\
-         is not compatible with type bool"
+        \       does not match the interface src/dune_rules/.dune_rules.objs/byte/dune_rules__Artifacts.cmi:\n\
+        \        ... ... In module Bin.Local:\n\
+        \       Values do not match:\n\
+        \         val equal :\n\
+        \           Import.Path.Build.t Import.String.Set.map ->\n\
+        \           Import.Path.Build.t Import.String.Set.map -> bool\n\
+        \       is not included in\n\
+        \         val equal : t -> bool -> bool\n\
+        \       The type\n\
+        \         Import.Path.Build.t Import.String.Set.map ->\n\
+        \         Import.Path.Build.t Import.String.Set.map -> bool\n\
+        \       is not compatible with the type t -> bool -> bool\n\
+        \       Type Import.Path.Build.t Import.String.Set.map\n\
+        \       is not compatible with type bool"
     ; related =
         [ ({ path = "src/dune_rules/artifacts.mli"
            ; line = Single 20
@@ -293,6 +307,41 @@ Error: Some record fields are undefined: signal_watcher
     ; severity = Error None
     } |}]
 
+let%expect_test "undefined fields" =
+  test_error_raw {|
+Error: Some record fields are undefined: signal_watcher
+|};
+  [%expect
+    {|
+    [ "Error: Some record fields are undefined: signal_watcher" ] |}]
+
+let%expect_test "test error from merlin" =
+  test_error_raw
+    {|Signature mismatch:
+Modules do not match:
+  sig val x : int end
+is not included in
+  sig val x : unit end
+Values do not match: val x : int is not included in val x : unit
+The type int is not compatible with the type unit
+File "test.ml", line 2, characters 2-14: Expected declaration
+File "test.ml", line 4, characters 6-7: Actual declaration
+  |};
+  [%expect
+    {|
+    [ "Signature mismatch:\n\
+       Modules do not match:\n\
+      \  sig val x : int end\n\
+       is not included in\n\
+      \  sig val x : unit end\n\
+       Values do not match: val x : int is not included in val x : unit\n\
+       The type int is not compatible with the type unit"
+    ; { path = "test.ml"; line = Single 2; chars = Some (2, 14) }
+    ; "Expected declaration"
+    ; { path = "test.ml"; line = Single 4; chars = Some (6, 7) }
+    ; "Actual declaration"
+    ] |}]
+
 let%expect_test "ml/mli error" =
   test_error
     {|
@@ -313,8 +362,8 @@ Error: The implementation src/dune_engine/build_system.ml
         }
     ; message =
         "The implementation src/dune_engine/build_system.ml\n\
-         does not match the interface src/dune_engine/.dune_engine.objs/byte/dune_engine__Build_system.cmi:\n\
-        \  The value `dune_stats' is required but not provided"
+        \      does not match the interface src/dune_engine/.dune_engine.objs/byte/dune_engine__Build_system.cmi:\n\
+        \        The value `dune_stats' is required but not provided"
     ; related =
         [ ({ path = "src/dune_engine/build_system.mli"
            ; line = Single 8
